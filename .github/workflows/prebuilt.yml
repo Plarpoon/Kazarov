@@ -1,10 +1,13 @@
 # Builds the dependencies that no package manager ships as needed and publishes them as release assets,
-# so consumers' CI downloads and verifies them instead of compiling. Push a deps-<n> tag to publish.
+# so consumers' CI downloads and verifies them instead of compiling. A merge that changes a version publishes
+# deps-ffmpeg-<version>-cxxbridge-<version>; an existing release is never rebuilt, so its digests stay valid.
 name: Prebuilt dependencies
 
 on:
   push:
-    tags: ['deps-*']
+    branches: [main]
+    paths: [tools/ffmpeg/kz-ffmpeg, .github/workflows/prebuilt.yml]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -14,7 +17,30 @@ env:
   RUST_VERSION: 1.99.0
 
 jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      publish: ${{ steps.tag.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ffmpeg=$(python3 -c "import runpy; print(runpy.run_path('tools/ffmpeg/kz-ffmpeg')['VERSION'])")
+          tag="deps-ffmpeg-$ffmpeg-cxxbridge-$CXXBRIDGE_VERSION"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "$tag is already published"
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
   ffmpeg:
+    needs: plan
+    if: needs.plan.outputs.publish == 'true'
     strategy:
       matrix:
         include:
@@ -45,6 +71,8 @@ jobs:
           if-no-files-found: error
 
   cxxbridge:
+    needs: plan
+    if: needs.plan.outputs.publish == 'true'
     strategy:
       matrix:
         include:
@@ -85,7 +113,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: [ffmpeg, cxxbridge]
+    needs: [plan, ffmpeg, cxxbridge]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -97,9 +125,10 @@ jobs:
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.plan.outputs.tag }}
         run: |
           cd assets
           sha256sum * > SHA256SUMS
           cat SHA256SUMS
-          gh release create "$GITHUB_REF_NAME" * --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" \
+          gh release create "$TAG" * --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "$TAG" \
             --notes "Prebuilt LGPL FFmpeg (kz-ffmpeg) and cxxbridge-cmd $CXXBRIDGE_VERSION. Checksums in SHA256SUMS."
